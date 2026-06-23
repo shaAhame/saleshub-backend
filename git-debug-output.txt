@@ -1,0 +1,24 @@
++/bin/zsh:13> echo PWD:
+PWD:
++/bin/zsh:13> pwd
+/Users/shakeeb/Desktop/sales-system/backend
++/bin/zsh:13> echo GIT_VERSION:
+GIT_VERSION:
++/bin/zsh:13> git --version
+git version 2.50.1 (Apple Git-155)
++/bin/zsh:13> echo STATUS:
+STATUS:
++/bin/zsh:13> git status --short --branch
+## main
+?? git-debug-output.txt
++/bin/zsh:13> echo REMOTE:
+REMOTE:
++/bin/zsh:13> git remote -v
+origin	https://shaAhame@github.com/shaAhame/saleshub-backend.git (fetch)
+origin	https://shaAhame@github.com/shaAhame/saleshub-backend.git (push)
++/bin/zsh:13> echo LSREMOTE:
+LSREMOTE:
++/bin/zsh:13> git ls-remote origin refs/heads/main refs/heads/master
++/bin/zsh:13> echo PUSH:
+PUSH:
++/bin/zsh:13> git push origin main
