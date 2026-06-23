@@ -9,9 +9,9 @@ const branchGuard = (req) => {
   return req.user.branch;
 };
 
-// GET sales - filtered by branch for manager, all for admin
+// GET sales
 router.get('/', auth, async (req, res) => {
-  const { date, branch } = req.query;
+  const { date, branch, imei } = req.query;
   const userBranch = branchGuard(req);
   const effectiveBranch = userBranch || branch || null;
 
@@ -19,7 +19,8 @@ router.get('/', auth, async (req, res) => {
   const params = [];
   if (effectiveBranch) { params.push(effectiveBranch); query += ` AND branch = $${params.length}`; }
   if (date) { params.push(date); query += ` AND sale_date = $${params.length}`; }
-  query += ' ORDER BY sale_date DESC, row_number ASC';
+  if (imei) { params.push(`%${imei}%`); query += ` AND serial_imei ILIKE $${params.length}`; }
+  query += ' ORDER BY sale_date DESC, id ASC';
 
   const result = await pool.query(query, params);
   res.json(result.rows);
@@ -42,21 +43,22 @@ router.post('/', auth, async (req, res) => {
   if (!branch) return res.status(400).json({ error: 'Branch required' });
 
   const {
-    sale_date, row_number, customer_name, acc_inv_no, contact, inv_no,
+    sale_date, customer_name, acc_inv_no, contact, inv_no,
     item_description, serial_imei, supplier_name, cost, invoice_value,
     payment_method, sales_person, out_status, remarks, cashier, google_review
   } = req.body;
 
   try {
+    const effectiveOutStatus = req.user.role === 'admin' ? (out_status || 'NO') : 'NO';
     const result = await pool.query(`
-      INSERT INTO sales (branch, sale_date, row_number, customer_name, acc_inv_no, contact, inv_no,
+      INSERT INTO sales (branch, sale_date, customer_name, acc_inv_no, contact, inv_no,
         item_description, serial_imei, supplier_name, cost, invoice_value,
         payment_method, sales_person, out_status, remarks, cashier, google_review, created_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
       RETURNING *`,
-      [branch, sale_date || new Date(), row_number, customer_name, acc_inv_no, contact, inv_no,
-       item_description, serial_imei, supplier_name, cost, invoice_value,
-       payment_method, sales_person, out_status, remarks, cashier, google_review, req.user.id]
+      [branch, sale_date || new Date(), customer_name, acc_inv_no, contact, inv_no,
+       item_description, serial_imei, supplier_name, cost || null, invoice_value || null,
+       payment_method, sales_person, effectiveOutStatus, remarks, cashier, google_review, req.user.id]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -72,20 +74,22 @@ router.put('/:id', auth, async (req, res) => {
   if (userBranch && existing.rows[0].branch !== userBranch) return res.status(403).json({ error: 'Forbidden' });
 
   const {
-    sale_date, row_number, customer_name, acc_inv_no, contact, inv_no,
+    sale_date, customer_name, acc_inv_no, contact, inv_no,
     item_description, serial_imei, supplier_name, cost, invoice_value,
     payment_method, sales_person, out_status, remarks, cashier, google_review
   } = req.body;
 
+  const effectiveOutStatus = req.user.role === 'admin' ? out_status : existing.rows[0].out_status;
+
   const result = await pool.query(`
-    UPDATE sales SET sale_date=$1, row_number=$2, customer_name=$3, acc_inv_no=$4, contact=$5,
-      inv_no=$6, item_description=$7, serial_imei=$8, supplier_name=$9, cost=$10,
-      invoice_value=$11, payment_method=$12, sales_person=$13, out_status=$14,
-      remarks=$15, cashier=$16, google_review=$17, updated_at=NOW()
-    WHERE id=$18 RETURNING *`,
-    [sale_date, row_number, customer_name, acc_inv_no, contact, inv_no,
-     item_description, serial_imei, supplier_name, cost, invoice_value,
-     payment_method, sales_person, out_status, remarks, cashier, google_review, req.params.id]
+    UPDATE sales SET sale_date=$1, customer_name=$2, acc_inv_no=$3, contact=$4,
+      inv_no=$5, item_description=$6, serial_imei=$7, supplier_name=$8, cost=$9,
+      invoice_value=$10, payment_method=$11, sales_person=$12, out_status=$13,
+      remarks=$14, cashier=$15, google_review=$16, updated_at=NOW()
+    WHERE id=$17 RETURNING *`,
+    [sale_date, customer_name, acc_inv_no, contact, inv_no,
+     item_description, serial_imei, supplier_name, cost || null, invoice_value || null,
+     payment_method, sales_person, effectiveOutStatus, remarks, cashier, google_review, req.params.id]
   );
   res.json(result.rows[0]);
 });
@@ -110,15 +114,14 @@ router.get('/export/excel', auth, async (req, res) => {
   const params = [];
   if (effectiveBranch) { params.push(effectiveBranch); query += ` AND branch = $${params.length}`; }
   if (date) { params.push(date); query += ` AND sale_date = $${params.length}`; }
-  query += ' ORDER BY branch, sale_date, row_number';
+  query += ' ORDER BY branch, sale_date, id';
 
   const { rows } = await pool.query(query, params);
-
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('Sales Report');
 
   sheet.columns = [
-    { header: '#', key: 'row_number', width: 5 },
+    { header: 'No', key: 'id', width: 5 },
     { header: 'Branch', key: 'branch', width: 10 },
     { header: 'Date', key: 'sale_date', width: 12 },
     { header: 'Customer Name', key: 'customer_name', width: 20 },
@@ -140,7 +143,6 @@ router.get('/export/excel', auth, async (req, res) => {
 
   sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
   sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } };
-
   rows.forEach(r => sheet.addRow(r));
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -159,10 +161,9 @@ router.get('/export/pdf', auth, async (req, res) => {
   const params = [];
   if (effectiveBranch) { params.push(effectiveBranch); query += ` AND branch = $${params.length}`; }
   if (date) { params.push(date); query += ` AND sale_date = $${params.length}`; }
-  query += ' ORDER BY branch, sale_date, row_number';
+  query += ' ORDER BY branch, sale_date, id';
 
   const { rows } = await pool.query(query, params);
-
   const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename=sales_${date || 'all'}.pdf`);
@@ -174,7 +175,7 @@ router.get('/export/pdf', auth, async (req, res) => {
   );
   doc.moveDown(0.5);
 
-  const cols = ['#', 'Branch', 'Date', 'Customer', 'INV No.', 'Item', 'Serial/IMEI', 'Cost', 'Inv.Value', 'Payment', 'Salesperson', 'Out'];
+  const cols = ['No', 'Branch', 'Date', 'Customer', 'INV No.', 'Item', 'Serial/IMEI', 'Cost', 'Inv.Value', 'Payment', 'Salesperson', 'Out'];
   const widths = [25, 50, 60, 90, 60, 100, 90, 55, 60, 70, 70, 50];
   let x = 30;
   const y = doc.y;
@@ -192,7 +193,7 @@ router.get('/export/pdf', auth, async (req, res) => {
     x = 30;
     const bg = idx % 2 === 0 ? '#F8F7FF' : '#FFFFFF';
     const values = [
-      r.row_number, r.branch,
+      idx + 1, r.branch,
       r.sale_date ? new Date(r.sale_date).toLocaleDateString() : '',
       r.customer_name, r.inv_no, r.item_description,
       r.serial_imei, r.cost, r.invoice_value,
