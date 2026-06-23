@@ -44,14 +44,30 @@ router.post('/users', auth, adminOnly, async (req, res) => {
   }
 });
 
-// Change password
-router.put('/users/:id/password', auth, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.id !== parseInt(req.params.id))
-    return res.status(403).json({ error: 'Forbidden' });
-  const { password } = req.body;
-  const hash = await bcrypt.hash(password, 10);
-  await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hash, req.params.id]);
-  res.json({ success: true });
+// Update username and/or password (admin only)
+router.put('/users/:id', auth, adminOnly, async (req, res) => {
+  const { username, password } = req.body;
+  try {
+    if (password) {
+      const hash = await bcrypt.hash(password, 10);
+      await pool.query(
+        'UPDATE users SET username = $1, password = $2 WHERE id = $3',
+        [username, hash, req.params.id]
+      );
+    } else {
+      await pool.query(
+        'UPDATE users SET username = $1 WHERE id = $2',
+        [username, req.params.id]
+      );
+    }
+    const result = await pool.query(
+      'SELECT id, username, role, branch FROM users WHERE id = $1',
+      [req.params.id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Delete user (admin only)
