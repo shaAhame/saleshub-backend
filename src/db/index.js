@@ -70,16 +70,31 @@ const initDB = async () => {
     console.log('✅ Default users seeded');
   }
 
-  // Add sale_items table if not exists (for existing deployments)
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS sale_items (
-      id SERIAL PRIMARY KEY,
-      sale_id INTEGER REFERENCES sales(id) ON DELETE CASCADE,
-      item_description TEXT,
-      serial_imei VARCHAR(100),
-      created_at TIMESTAMP DEFAULT NOW()
-    );
+  // Add old columns to sales if they still exist (for migration)
+  try {
+    await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS item_description TEXT`);
+    await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS serial_imei VARCHAR(100)`);
+  } catch (e) { /* ignore */ }
+
+  // MIGRATION: Move old item_description + serial_imei from sales into sale_items
+  const oldSales = await pool.query(`
+    SELECT id, item_description, serial_imei FROM sales
+    WHERE (item_description IS NOT NULL OR serial_imei IS NOT NULL)
+    AND id NOT IN (SELECT DISTINCT sale_id FROM sale_items WHERE sale_id IS NOT NULL)
   `);
+
+  if (oldSales.rows.length > 0) {
+    console.log(`🔄 Migrating ${oldSales.rows.length} old sales to sale_items...`);
+    for (const sale of oldSales.rows) {
+      if (sale.item_description || sale.serial_imei) {
+        await pool.query(
+          'INSERT INTO sale_items (sale_id, item_description, serial_imei) VALUES ($1, $2, $3)',
+          [sale.id, sale.item_description || null, sale.serial_imei || null]
+        );
+      }
+    }
+    console.log('✅ Migration complete!');
+  }
 
   console.log('✅ Database initialized');
 };
