@@ -20,29 +20,33 @@ const initDB = async () => {
       id SERIAL PRIMARY KEY,
       branch VARCHAR(20) NOT NULL CHECK (branch IN ('Prime', 'Liberty', 'Marino')),
       sale_date DATE NOT NULL DEFAULT CURRENT_DATE,
-      row_number INTEGER,
-      customer_name VARCHAR(255),
-      acc_inv_no VARCHAR(100),
-      contact VARCHAR(50),
       inv_no VARCHAR(100),
-      item_description TEXT,
-      serial_imei VARCHAR(100),
-      supplier_name VARCHAR(255),
-      cost NUMERIC(12,2),
-      invoice_value NUMERIC(12,2),
+      acc_inv_no VARCHAR(100),
+      customer_name VARCHAR(255),
+      contact VARCHAR(50),
       payment_method VARCHAR(50),
       sales_person VARCHAR(100),
-      out_status VARCHAR(100),
-      remarks TEXT,
+      out_status VARCHAR(10) DEFAULT 'NO',
       cashier VARCHAR(100),
-      google_review VARCHAR(50),
+      invoice_value NUMERIC(12,2),
+      google_review VARCHAR(10),
+      remarks TEXT,
+      supplier_name VARCHAR(255),
+      cost NUMERIC(12,2),
       created_by INTEGER REFERENCES users(id),
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS sale_items (
+      id SERIAL PRIMARY KEY,
+      sale_id INTEGER REFERENCES sales(id) ON DELETE CASCADE,
+      item_description TEXT,
+      serial_imei VARCHAR(100),
+      created_at TIMESTAMP DEFAULT NOW()
+    );
   `);
 
-  // Seed admin user if not exists (password: admin123)
   const bcrypt = require('bcryptjs');
   const existing = await pool.query("SELECT id FROM users WHERE username = 'admin'");
   if (existing.rows.length === 0) {
@@ -51,7 +55,6 @@ const initDB = async () => {
       "INSERT INTO users (username, password, role, branch) VALUES ($1, $2, 'admin', NULL)",
       ['admin', hash]
     );
-    // Seed branch managers
     const managers = [
       { username: 'manager_prime', branch: 'Prime' },
       { username: 'manager_liberty', branch: 'Liberty' },
@@ -66,6 +69,17 @@ const initDB = async () => {
     }
     console.log('✅ Default users seeded');
   }
+
+  // Add sale_items table if not exists (for existing deployments)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sale_items (
+      id SERIAL PRIMARY KEY,
+      sale_id INTEGER REFERENCES sales(id) ON DELETE CASCADE,
+      item_description TEXT,
+      serial_imei VARCHAR(100),
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
 
   console.log('✅ Database initialized');
 };
