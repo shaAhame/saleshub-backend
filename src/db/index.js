@@ -43,6 +43,9 @@ const initDB = async () => {
       sale_id INTEGER REFERENCES sales(id) ON DELETE CASCADE,
       item_description TEXT,
       serial_imei VARCHAR(100),
+      invoice_value NUMERIC(12,2),
+      cost NUMERIC(12,2),
+      supplier_name VARCHAR(255),
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -70,15 +73,16 @@ const initDB = async () => {
     console.log('✅ Default users seeded');
   }
 
-  // Add old columns to sales if they still exist (for migration)
-  try {
-    await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS item_description TEXT`);
-    await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS serial_imei VARCHAR(100)`);
-  } catch (e) { /* ignore */ }
+  // Add new columns to sale_items if not exist
+  try { await pool.query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS invoice_value NUMERIC(12,2)`); } catch(e) {}
+  try { await pool.query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS cost NUMERIC(12,2)`); } catch(e) {}
+  try { await pool.query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(255)`); } catch(e) {}
+  try { await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS item_description TEXT`); } catch(e) {}
+  try { await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS serial_imei VARCHAR(100)`); } catch(e) {}
 
   // MIGRATION: Move old item_description + serial_imei from sales into sale_items
   const oldSales = await pool.query(`
-    SELECT id, item_description, serial_imei FROM sales
+    SELECT id, item_description, serial_imei, invoice_value, cost, supplier_name FROM sales
     WHERE (item_description IS NOT NULL OR serial_imei IS NOT NULL)
     AND id NOT IN (SELECT DISTINCT sale_id FROM sale_items WHERE sale_id IS NOT NULL)
   `);
@@ -88,8 +92,8 @@ const initDB = async () => {
     for (const sale of oldSales.rows) {
       if (sale.item_description || sale.serial_imei) {
         await pool.query(
-          'INSERT INTO sale_items (sale_id, item_description, serial_imei) VALUES ($1, $2, $3)',
-          [sale.id, sale.item_description || null, sale.serial_imei || null]
+          'INSERT INTO sale_items (sale_id, item_description, serial_imei, invoice_value, cost, supplier_name) VALUES ($1,$2,$3,$4,$5,$6)',
+          [sale.id, sale.item_description || null, sale.serial_imei || null, sale.invoice_value || null, sale.cost || null, sale.supplier_name || null]
         );
       }
     }
