@@ -16,10 +16,9 @@ router.get('/', auth, async (req, res) => {
   const effectiveBranch = userBranch || branch || null;
 
   try {
-    // If IMEI search — search in sale_items table
     if (imei) {
       let query = `
-        SELECT s.*, si.item_description, si.serial_imei
+        SELECT s.*, si.item_description, si.serial_imei, si.invoice_value as item_invoice_value
         FROM sales s
         JOIN sale_items si ON si.sale_id = s.id
         WHERE si.serial_imei ILIKE $1
@@ -40,7 +39,6 @@ router.get('/', auth, async (req, res) => {
     const salesResult = await pool.query(query, params);
     const sales = salesResult.rows;
 
-    // Get items for each sale
     if (sales.length > 0) {
       const saleIds = sales.map(s => s.id);
       const itemsResult = await pool.query(
@@ -52,7 +50,11 @@ router.get('/', auth, async (req, res) => {
         if (!itemsBySaleId[item.sale_id]) itemsBySaleId[item.sale_id] = [];
         itemsBySaleId[item.sale_id].push(item);
       });
-      sales.forEach(s => { s.items = itemsBySaleId[s.id] || []; });
+      sales.forEach(s => {
+        s.items = itemsBySaleId[s.id] || [];
+        // Calculate total invoice value from items
+        s.total_invoice_value = s.items.reduce((sum, item) => sum + parseFloat(item.invoice_value || 0), 0);
+      });
     }
 
     res.json(sales);
@@ -61,7 +63,7 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-// GET single sale with items
+// GET single sale
 router.get('/:id', auth, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
@@ -77,7 +79,7 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
-// CREATE sale with items
+// CREATE sale
 router.post('/', auth, async (req, res) => {
   const userBranch = branchGuard(req);
   const branch = userBranch || req.body.branch;
@@ -86,8 +88,7 @@ router.post('/', auth, async (req, res) => {
   const {
     sale_date, inv_no, acc_inv_no, customer_name, contact,
     payment_method, sales_person, out_status, cashier,
-    invoice_value, google_review, remarks, supplier_name, cost,
-    items = []
+    google_review, remarks, items = []
   } = req.body;
 
   const client = await pool.connect();
@@ -95,25 +96,30 @@ router.post('/', auth, async (req, res) => {
     await client.query('BEGIN');
     const effectiveOutStatus = req.user.role === 'admin' ? (out_status || 'NO') : 'NO';
 
+    // Calculate total invoice value and cost from items
+    const totalInvoiceValue = items.reduce((sum, item) => sum + parseFloat(item.invoice_value || 0), 0);
+    const totalCost = items.reduce((sum, item) => sum + parseFloat(item.cost || 0), 0);
+
     const saleResult = await client.query(`
       INSERT INTO sales (branch, sale_date, inv_no, acc_inv_no, customer_name, contact,
         payment_method, sales_person, out_status, cashier, invoice_value,
-        google_review, remarks, supplier_name, cost, created_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        cost, google_review, remarks, created_by)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       RETURNING *`,
       [branch, sale_date || new Date(), inv_no, acc_inv_no, customer_name, contact,
-       payment_method, sales_person, effectiveOutStatus, cashier, invoice_value || null,
-       google_review, remarks, supplier_name, cost || null, req.user.id]
+       payment_method, sales_person, effectiveOutStatus, cashier,
+       totalInvoiceValue || null, totalCost || null,
+       google_review, remarks, req.user.id]
     );
 
     const sale = saleResult.rows[0];
 
-    // Insert items
     for (const item of items) {
       if (item.item_description || item.serial_imei) {
         await client.query(
-          'INSERT INTO sale_items (sale_id, item_description, serial_imei) VALUES ($1,$2,$3)',
-          [sale.id, item.item_description || null, item.serial_imei || null]
+          'INSERT INTO sale_items (sale_id, item_description, serial_imei, invoice_value, cost, supplier_name) VALUES ($1,$2,$3,$4,$5,$6)',
+          [sale.id, item.item_description || null, item.serial_imei || null,
+           item.invoice_value || null, item.cost || null, item.supplier_name || null]
         );
       }
     }
@@ -130,7 +136,7 @@ router.post('/', auth, async (req, res) => {
   }
 });
 
-// UPDATE sale with items
+// UPDATE sale
 router.put('/:id', auth, async (req, res) => {
   const existing = await pool.query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
   if (!existing.rows[0]) return res.status(404).json({ error: 'Not found' });
@@ -140,11 +146,12 @@ router.put('/:id', auth, async (req, res) => {
   const {
     sale_date, inv_no, acc_inv_no, customer_name, contact,
     payment_method, sales_person, out_status, cashier,
-    invoice_value, google_review, remarks, supplier_name, cost,
-    items = []
+    google_review, remarks, items = []
   } = req.body;
 
   const effectiveOutStatus = req.user.role === 'admin' ? out_status : existing.rows[0].out_status;
+  const totalInvoiceValue = items.reduce((sum, item) => sum + parseFloat(item.invoice_value || 0), 0);
+  const totalCost = items.reduce((sum, item) => sum + parseFloat(item.cost || 0), 0);
 
   const client = await pool.connect();
   try {
@@ -152,20 +159,21 @@ router.put('/:id', auth, async (req, res) => {
     const result = await client.query(`
       UPDATE sales SET sale_date=$1, inv_no=$2, acc_inv_no=$3, customer_name=$4, contact=$5,
         payment_method=$6, sales_person=$7, out_status=$8, cashier=$9,
-        invoice_value=$10, google_review=$11, remarks=$12, supplier_name=$13, cost=$14, updated_at=NOW()
-      WHERE id=$15 RETURNING *`,
+        invoice_value=$10, cost=$11, google_review=$12, remarks=$13, updated_at=NOW()
+      WHERE id=$14 RETURNING *`,
       [sale_date, inv_no, acc_inv_no, customer_name, contact,
        payment_method, sales_person, effectiveOutStatus, cashier,
-       invoice_value || null, google_review, remarks, supplier_name, cost || null, req.params.id]
+       totalInvoiceValue || null, totalCost || null,
+       google_review, remarks, req.params.id]
     );
 
-    // Replace all items
     await client.query('DELETE FROM sale_items WHERE sale_id = $1', [req.params.id]);
     for (const item of items) {
       if (item.item_description || item.serial_imei) {
         await client.query(
-          'INSERT INTO sale_items (sale_id, item_description, serial_imei) VALUES ($1,$2,$3)',
-          [req.params.id, item.item_description || null, item.serial_imei || null]
+          'INSERT INTO sale_items (sale_id, item_description, serial_imei, invoice_value, cost, supplier_name) VALUES ($1,$2,$3,$4,$5,$6)',
+          [req.params.id, item.item_description || null, item.serial_imei || null,
+           item.invoice_value || null, item.cost || null, item.supplier_name || null]
         );
       }
     }
@@ -200,7 +208,10 @@ router.get('/export/excel', auth, async (req, res) => {
   const effectiveBranch = userBranch || branch || null;
 
   let query = `
-    SELECT s.*, si.item_description, si.serial_imei
+    SELECT s.branch, s.sale_date, s.inv_no, s.acc_inv_no, s.customer_name, s.contact,
+           si.item_description, si.serial_imei, si.invoice_value, si.cost, si.supplier_name,
+           s.payment_method, s.sales_person, s.out_status, s.cashier,
+           s.google_review, s.remarks
     FROM sales s
     LEFT JOIN sale_items si ON si.sale_id = s.id
     WHERE 1=1
@@ -223,15 +234,15 @@ router.get('/export/excel', auth, async (req, res) => {
     { header: 'Contact', key: 'contact', width: 14 },
     { header: 'Item Description', key: 'item_description', width: 28 },
     { header: 'Serial/IMEI', key: 'serial_imei', width: 20 },
+    { header: 'Invoice Value', key: 'invoice_value', width: 14 },
+    { header: 'Cost', key: 'cost', width: 12 },
+    { header: 'Supplier', key: 'supplier_name', width: 18 },
     { header: 'Payment Method', key: 'payment_method', width: 16 },
     { header: 'Sales Person', key: 'sales_person', width: 15 },
     { header: 'Out Status', key: 'out_status', width: 10 },
     { header: 'Cashier', key: 'cashier', width: 14 },
-    { header: 'Invoice Value', key: 'invoice_value', width: 14 },
     { header: 'Google Review', key: 'google_review', width: 14 },
     { header: 'Remarks', key: 'remarks', width: 20 },
-    { header: 'Supplier', key: 'supplier_name', width: 18 },
-    { header: 'Cost', key: 'cost', width: 12 },
   ];
 
   sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -251,7 +262,9 @@ router.get('/export/pdf', auth, async (req, res) => {
   const effectiveBranch = userBranch || branch || null;
 
   let query = `
-    SELECT s.*, si.item_description, si.serial_imei
+    SELECT s.branch, s.sale_date, s.customer_name, s.inv_no,
+           si.item_description, si.serial_imei, si.invoice_value,
+           s.payment_method, s.sales_person, s.out_status
     FROM sales s
     LEFT JOIN sale_items si ON si.sale_id = s.id
     WHERE 1=1
