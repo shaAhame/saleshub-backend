@@ -18,7 +18,8 @@ router.get('/', auth, async (req, res) => {
   try {
     if (imei) {
       let query = `
-        SELECT s.*, si.item_description, si.serial_imei, si.invoice_value as item_invoice_value
+        SELECT s.*, si.item_description, si.serial_imei, si.invoice_value as item_invoice_value,
+               si.cost as item_cost, si.supplier_name as item_supplier
         FROM sales s
         JOIN sale_items si ON si.sale_id = s.id
         WHERE si.serial_imei ILIKE $1
@@ -52,7 +53,6 @@ router.get('/', auth, async (req, res) => {
       });
       sales.forEach(s => {
         s.items = itemsBySaleId[s.id] || [];
-        // Calculate total invoice value from items
         s.total_invoice_value = s.items.reduce((sum, item) => sum + parseFloat(item.invoice_value || 0), 0);
       });
     }
@@ -96,7 +96,6 @@ router.post('/', auth, async (req, res) => {
     await client.query('BEGIN');
     const effectiveOutStatus = req.user.role === 'admin' ? (out_status || 'NO') : 'NO';
 
-    // Calculate total invoice value and cost from items
     const totalInvoiceValue = items.reduce((sum, item) => sum + parseFloat(item.invoice_value || 0), 0);
     const totalCost = items.reduce((sum, item) => sum + parseFloat(item.cost || 0), 0);
 
@@ -203,7 +202,7 @@ router.delete('/:id', auth, async (req, res) => {
 
 // EXPORT Excel
 router.get('/export/excel', auth, async (req, res) => {
-  const { date, branch } = req.query;
+  const { date, branch, from, to } = req.query;
   const userBranch = branchGuard(req);
   const effectiveBranch = userBranch || branch || null;
 
@@ -219,6 +218,8 @@ router.get('/export/excel', auth, async (req, res) => {
   const params = [];
   if (effectiveBranch) { params.push(effectiveBranch); query += ` AND s.branch = $${params.length}`; }
   if (date) { params.push(date); query += ` AND s.sale_date = $${params.length}`; }
+  if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
+  if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
   query += ' ORDER BY s.branch, s.sale_date, s.id, si.id';
 
   const { rows } = await pool.query(query, params);
@@ -250,14 +251,14 @@ router.get('/export/excel', auth, async (req, res) => {
   rows.forEach(r => sheet.addRow(r));
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename=sales_${date || 'all'}.xlsx`);
+  res.setHeader('Content-Disposition', `attachment; filename=sales_${from || date || 'all'}_${to || ''}.xlsx`);
   await workbook.xlsx.write(res);
   res.end();
 });
 
 // EXPORT PDF
 router.get('/export/pdf', auth, async (req, res) => {
-  const { date, branch } = req.query;
+  const { date, branch, from, to } = req.query;
   const userBranch = branchGuard(req);
   const effectiveBranch = userBranch || branch || null;
 
@@ -272,18 +273,18 @@ router.get('/export/pdf', auth, async (req, res) => {
   const params = [];
   if (effectiveBranch) { params.push(effectiveBranch); query += ` AND s.branch = $${params.length}`; }
   if (date) { params.push(date); query += ` AND s.sale_date = $${params.length}`; }
+  if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
+  if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
   query += ' ORDER BY s.branch, s.sale_date, s.id, si.id';
 
   const { rows } = await pool.query(query, params);
   const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=sales_${date || 'all'}.pdf`);
+  res.setHeader('Content-Disposition', `attachment; filename=sales_${from || date || 'all'}_${to || ''}.pdf`);
   doc.pipe(res);
 
-  doc.fontSize(16).font('Helvetica-Bold').text(
-    `Sales Report — ${effectiveBranch || 'All Branches'} — ${date || 'All Dates'}`,
-    { align: 'center' }
-  );
+  const title = `Sales Report — ${effectiveBranch || 'All Branches'} — ${from ? `${from} to ${to}` : date || 'All Dates'}`;
+  doc.fontSize(14).font('Helvetica-Bold').text(title, { align: 'center' });
   doc.moveDown(0.5);
 
   const cols = ['Branch', 'Date', 'Customer', 'Item', 'Serial/IMEI', 'Inv.Value', 'Payment', 'Salesperson', 'Out'];
@@ -307,7 +308,8 @@ router.get('/export/pdf', auth, async (req, res) => {
       r.branch,
       r.sale_date ? new Date(r.sale_date).toLocaleDateString() : '',
       r.customer_name, r.item_description, r.serial_imei,
-      r.invoice_value, r.payment_method, r.sales_person, r.out_status
+      r.invoice_value ? `Rs.${Number(r.invoice_value).toLocaleString()}` : '',
+      r.payment_method, r.sales_person, r.out_status
     ];
     doc.fontSize(6).font('Helvetica');
     values.forEach((val, i) => {
