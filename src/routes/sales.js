@@ -63,7 +63,289 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-// GET single sale
+// EXPORT Excel — must be before /:id
+router.get('/export/excel', auth, async (req, res) => {
+  const { date, branch, from, to } = req.query;
+  const userBranch = branchGuard(req);
+  const effectiveBranch = userBranch || branch || null;
+
+  let query = `
+    SELECT s.branch, s.sale_date, s.inv_no, s.acc_inv_no, s.customer_name, s.contact,
+           si.item_description, si.serial_imei, si.invoice_value, si.cost, si.supplier_name,
+           s.payment_method, s.sales_person, s.out_status, s.cashier,
+           s.google_review, s.remarks
+    FROM sales s
+    LEFT JOIN sale_items si ON si.sale_id = s.id
+    WHERE 1=1
+  `;
+  const params = [];
+  if (effectiveBranch) { params.push(effectiveBranch); query += ` AND s.branch = $${params.length}`; }
+  if (date) { params.push(date); query += ` AND s.sale_date = $${params.length}`; }
+  if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
+  if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
+  query += ' ORDER BY s.branch, s.sale_date, s.id, si.id';
+
+  const { rows } = await pool.query(query, params);
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sales Report');
+
+  sheet.columns = [
+    { header: 'Branch', key: 'branch', width: 10 },
+    { header: 'Date', key: 'sale_date', width: 12 },
+    { header: 'INV No.', key: 'inv_no', width: 12 },
+    { header: 'ACC INV No.', key: 'acc_inv_no', width: 14 },
+    { header: 'Customer Name', key: 'customer_name', width: 20 },
+    { header: 'Contact', key: 'contact', width: 14 },
+    { header: 'Item Description', key: 'item_description', width: 28 },
+    { header: 'Serial/IMEI', key: 'serial_imei', width: 20 },
+    { header: 'Invoice Value', key: 'invoice_value', width: 14 },
+    { header: 'Cost', key: 'cost', width: 12 },
+    { header: 'Supplier', key: 'supplier_name', width: 18 },
+    { header: 'Payment Method', key: 'payment_method', width: 16 },
+    { header: 'Sales Person', key: 'sales_person', width: 15 },
+    { header: 'Out Status', key: 'out_status', width: 10 },
+    { header: 'Cashier', key: 'cashier', width: 14 },
+    { header: 'Google Review', key: 'google_review', width: 14 },
+    { header: 'Remarks', key: 'remarks', width: 20 },
+  ];
+
+  sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } };
+  rows.forEach(r => sheet.addRow(r));
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename=sales_${from || date || 'all'}_${to || ''}.xlsx`);
+  await workbook.xlsx.write(res);
+  res.end();
+});
+
+// EXPORT PDF — must be before /:id
+router.get('/export/pdf', auth, async (req, res) => {
+  const { date, branch, from, to } = req.query;
+  const userBranch = branchGuard(req);
+  const effectiveBranch = userBranch || branch || null;
+
+  let query = `
+    SELECT s.branch, s.sale_date, s.customer_name, s.inv_no,
+           si.item_description, si.serial_imei, si.invoice_value,
+           s.payment_method, s.sales_person, s.out_status
+    FROM sales s
+    LEFT JOIN sale_items si ON si.sale_id = s.id
+    WHERE 1=1
+  `;
+  const params = [];
+  if (effectiveBranch) { params.push(effectiveBranch); query += ` AND s.branch = $${params.length}`; }
+  if (date) { params.push(date); query += ` AND s.sale_date = $${params.length}`; }
+  if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
+  if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
+  query += ' ORDER BY s.branch, s.sale_date, s.id, si.id';
+
+  const { rows } = await pool.query(query, params);
+  const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename=sales_${from || date || 'all'}_${to || ''}.pdf`);
+  doc.pipe(res);
+
+  const title = `Sales Report — ${effectiveBranch || 'All Branches'} — ${from ? `${from} to ${to}` : date || 'All Dates'}`;
+  doc.fontSize(14).font('Helvetica-Bold').text(title, { align: 'center' });
+  doc.moveDown(0.5);
+
+  const cols = ['Branch', 'Date', 'Customer', 'Item', 'Serial/IMEI', 'Inv.Value', 'Payment', 'Salesperson', 'Out'];
+  const widths = [50, 60, 90, 110, 90, 60, 70, 70, 40];
+  let x = 30;
+  const y = doc.y;
+
+  doc.fontSize(7).font('Helvetica-Bold');
+  cols.forEach((col, i) => {
+    doc.rect(x, y, widths[i], 18).fillAndStroke('#4F46E5', '#4F46E5');
+    doc.fillColor('white').text(col, x + 2, y + 4, { width: widths[i] - 4 });
+    x += widths[i];
+  });
+  doc.fillColor('black');
+
+  let rowY = y + 18;
+  rows.forEach((r, idx) => {
+    x = 30;
+    const bg = idx % 2 === 0 ? '#F8F7FF' : '#FFFFFF';
+    const values = [
+      r.branch,
+      r.sale_date ? new Date(r.sale_date).toLocaleDateString() : '',
+      r.customer_name, r.item_description, r.serial_imei,
+      r.invoice_value ? `Rs.${Number(r.invoice_value).toLocaleString()}` : '',
+      r.payment_method, r.sales_person, r.out_status
+    ];
+    doc.fontSize(6).font('Helvetica');
+    values.forEach((val, i) => {
+      doc.rect(x, rowY, widths[i], 16).fillAndStroke(bg, '#DDDDDD');
+      doc.fillColor('black').text(String(val || ''), x + 2, rowY + 4, { width: widths[i] - 4 });
+      x += widths[i];
+    });
+    rowY += 16;
+    if (rowY > 540) { doc.addPage({ layout: 'landscape' }); rowY = 30; }
+  });
+
+  doc.end();
+});
+
+// SUPPLIER REPORT — must be before /:id
+router.get('/supplier-report', auth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { from, to, branch } = req.query;
+
+  try {
+    let query = `
+      SELECT s.branch, s.sale_date, s.customer_name, s.contact, s.inv_no,
+             s.payment_method, s.sales_person,
+             si.item_description, si.serial_imei,
+             si.supplier_name, si.cost, si.invoice_value
+      FROM sales s
+      JOIN sale_items si ON si.sale_id = s.id
+      WHERE si.supplier_name IS NOT NULL AND si.supplier_name != ''
+    `;
+    const params = [];
+    if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
+    if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
+    if (branch) { params.push(branch); query += ` AND s.branch = $${params.length}`; }
+    query += ' ORDER BY si.supplier_name, s.sale_date, s.id';
+
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// SUPPLIER REPORT EXPORT EXCEL — must be before /:id
+router.get('/supplier-report/export/excel', auth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { from, to, branch } = req.query;
+
+  let query = `
+    SELECT si.supplier_name, s.sale_date, s.branch, s.customer_name,
+           si.item_description, si.serial_imei, si.cost, si.invoice_value,
+           (COALESCE(si.invoice_value, 0) - COALESCE(si.cost, 0)) as profit
+    FROM sales s
+    JOIN sale_items si ON si.sale_id = s.id
+    WHERE si.supplier_name IS NOT NULL AND si.supplier_name != ''
+  `;
+  const params = [];
+  if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
+  if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
+  if (branch) { params.push(branch); query += ` AND s.branch = $${params.length}`; }
+  query += ' ORDER BY si.supplier_name, s.sale_date';
+
+  const { rows } = await pool.query(query, params);
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Supplier Report');
+
+  sheet.columns = [
+    { header: 'Supplier', key: 'supplier_name', width: 20 },
+    { header: 'Date', key: 'sale_date', width: 12 },
+    { header: 'Branch', key: 'branch', width: 10 },
+    { header: 'Customer', key: 'customer_name', width: 20 },
+    { header: 'Item Description', key: 'item_description', width: 30 },
+    { header: 'Serial/IMEI', key: 'serial_imei', width: 20 },
+    { header: 'Cost', key: 'cost', width: 14 },
+    { header: 'Invoice Value', key: 'invoice_value', width: 14 },
+    { header: 'Profit', key: 'profit', width: 14 },
+  ];
+
+  sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } };
+  rows.forEach(r => sheet.addRow(r));
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename=supplier_report_${from || 'all'}_${to || ''}.xlsx`);
+  await workbook.xlsx.write(res);
+  res.end();
+});
+
+// SUPPLIER REPORT EXPORT PDF — must be before /:id
+router.get('/supplier-report/export/pdf', auth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { from, to, branch } = req.query;
+
+  let query = `
+    SELECT si.supplier_name, s.sale_date, s.branch, s.customer_name,
+           si.item_description, si.serial_imei, si.cost, si.invoice_value,
+           (COALESCE(si.invoice_value, 0) - COALESCE(si.cost, 0)) as profit
+    FROM sales s
+    JOIN sale_items si ON si.sale_id = s.id
+    WHERE si.supplier_name IS NOT NULL AND si.supplier_name != ''
+  `;
+  const params = [];
+  if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
+  if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
+  if (branch) { params.push(branch); query += ` AND s.branch = $${params.length}`; }
+  query += ' ORDER BY si.supplier_name, s.sale_date';
+
+  const { rows } = await pool.query(query, params);
+  const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename=supplier_report_${from || 'all'}_${to || ''}.pdf`);
+  doc.pipe(res);
+
+  doc.fontSize(14).font('Helvetica-Bold').text(
+    `Supplier Report — ${branch || 'All Branches'} — ${from || ''} to ${to || ''}`,
+    { align: 'center' }
+  );
+  doc.moveDown(0.5);
+
+  const cols = ['Supplier', 'Date', 'Branch', 'Customer', 'Item', 'Serial/IMEI', 'Cost', 'Invoice', 'Profit'];
+  const widths = [80, 55, 50, 80, 110, 80, 55, 55, 55];
+  let x = 30;
+  const y = doc.y;
+
+  doc.fontSize(7).font('Helvetica-Bold');
+  cols.forEach((col, i) => {
+    doc.rect(x, y, widths[i], 18).fillAndStroke('#4F46E5', '#4F46E5');
+    doc.fillColor('white').text(col, x + 2, y + 4, { width: widths[i] - 4 });
+    x += widths[i];
+  });
+  doc.fillColor('black');
+
+  let rowY = y + 18;
+  let currentSupplier = null;
+
+  rows.forEach((r, idx) => {
+    if (r.supplier_name !== currentSupplier) {
+      currentSupplier = r.supplier_name;
+      const totalW = widths.reduce((a, b) => a + b, 0);
+      doc.rect(30, rowY, totalW, 14).fillAndStroke('#EEF2FF', '#EEF2FF');
+      doc.fontSize(7).font('Helvetica-Bold').fillColor('#4F46E5').text(
+        `${currentSupplier}`, 34, rowY + 3, { width: totalW - 8 }
+      );
+      rowY += 14;
+    }
+
+    x = 30;
+    const bg = idx % 2 === 0 ? '#FFFFFF' : '#F8F7FF';
+    const values = [
+      r.supplier_name,
+      r.sale_date ? new Date(r.sale_date).toLocaleDateString() : '',
+      r.branch, r.customer_name, r.item_description, r.serial_imei,
+      r.cost ? `Rs.${Number(r.cost).toLocaleString()}` : '-',
+      r.invoice_value ? `Rs.${Number(r.invoice_value).toLocaleString()}` : '-',
+      r.profit ? `Rs.${Number(r.profit).toLocaleString()}` : '-',
+    ];
+    doc.fontSize(6).font('Helvetica');
+    values.forEach((val, i) => {
+      doc.rect(x, rowY, widths[i], 16).fillAndStroke(bg, '#DDDDDD');
+      doc.fillColor('black').text(String(val || ''), x + 2, rowY + 4, { width: widths[i] - 4 });
+      x += widths[i];
+    });
+    rowY += 16;
+    if (rowY > 540) {
+      doc.addPage({ layout: 'landscape' });
+      rowY = 30;
+      currentSupplier = null;
+    }
+  });
+
+  doc.end();
+});
+
+// GET single sale — MUST BE AFTER ALL NAMED ROUTES
 router.get('/:id', auth, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM sales WHERE id = $1', [req.params.id]);
@@ -95,7 +377,6 @@ router.post('/', auth, async (req, res) => {
   try {
     await client.query('BEGIN');
     const effectiveOutStatus = req.user.role === 'admin' ? (out_status || 'NO') : 'NO';
-
     const totalInvoiceValue = items.reduce((sum, item) => sum + parseFloat(item.invoice_value || 0), 0);
     const totalCost = items.reduce((sum, item) => sum + parseFloat(item.cost || 0), 0);
 
@@ -112,7 +393,6 @@ router.post('/', auth, async (req, res) => {
     );
 
     const sale = saleResult.rows[0];
-
     for (const item of items) {
       if (item.item_description || item.serial_imei) {
         await client.query(
@@ -198,288 +478,6 @@ router.delete('/:id', auth, async (req, res) => {
   if (userBranch && existing.rows[0].branch !== userBranch) return res.status(403).json({ error: 'Forbidden' });
   await pool.query('DELETE FROM sales WHERE id = $1', [req.params.id]);
   res.json({ success: true });
-});
-
-// EXPORT Excel
-router.get('/export/excel', auth, async (req, res) => {
-  const { date, branch, from, to } = req.query;
-  const userBranch = branchGuard(req);
-  const effectiveBranch = userBranch || branch || null;
-
-  let query = `
-    SELECT s.branch, s.sale_date, s.inv_no, s.acc_inv_no, s.customer_name, s.contact,
-           si.item_description, si.serial_imei, si.invoice_value, si.cost, si.supplier_name,
-           s.payment_method, s.sales_person, s.out_status, s.cashier,
-           s.google_review, s.remarks
-    FROM sales s
-    LEFT JOIN sale_items si ON si.sale_id = s.id
-    WHERE 1=1
-  `;
-  const params = [];
-  if (effectiveBranch) { params.push(effectiveBranch); query += ` AND s.branch = $${params.length}`; }
-  if (date) { params.push(date); query += ` AND s.sale_date = $${params.length}`; }
-  if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
-  if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
-  query += ' ORDER BY s.branch, s.sale_date, s.id, si.id';
-
-  const { rows } = await pool.query(query, params);
-  const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet('Sales Report');
-
-  sheet.columns = [
-    { header: 'Branch', key: 'branch', width: 10 },
-    { header: 'Date', key: 'sale_date', width: 12 },
-    { header: 'INV No.', key: 'inv_no', width: 12 },
-    { header: 'ACC INV No.', key: 'acc_inv_no', width: 14 },
-    { header: 'Customer Name', key: 'customer_name', width: 20 },
-    { header: 'Contact', key: 'contact', width: 14 },
-    { header: 'Item Description', key: 'item_description', width: 28 },
-    { header: 'Serial/IMEI', key: 'serial_imei', width: 20 },
-    { header: 'Invoice Value', key: 'invoice_value', width: 14 },
-    { header: 'Cost', key: 'cost', width: 12 },
-    { header: 'Supplier', key: 'supplier_name', width: 18 },
-    { header: 'Payment Method', key: 'payment_method', width: 16 },
-    { header: 'Sales Person', key: 'sales_person', width: 15 },
-    { header: 'Out Status', key: 'out_status', width: 10 },
-    { header: 'Cashier', key: 'cashier', width: 14 },
-    { header: 'Google Review', key: 'google_review', width: 14 },
-    { header: 'Remarks', key: 'remarks', width: 20 },
-  ];
-
-  sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } };
-  rows.forEach(r => sheet.addRow(r));
-
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename=sales_${from || date || 'all'}_${to || ''}.xlsx`);
-  await workbook.xlsx.write(res);
-  res.end();
-});
-
-// EXPORT PDF
-router.get('/export/pdf', auth, async (req, res) => {
-  const { date, branch, from, to } = req.query;
-  const userBranch = branchGuard(req);
-  const effectiveBranch = userBranch || branch || null;
-
-  let query = `
-    SELECT s.branch, s.sale_date, s.customer_name, s.inv_no,
-           si.item_description, si.serial_imei, si.invoice_value,
-           s.payment_method, s.sales_person, s.out_status
-    FROM sales s
-    LEFT JOIN sale_items si ON si.sale_id = s.id
-    WHERE 1=1
-  `;
-  const params = [];
-  if (effectiveBranch) { params.push(effectiveBranch); query += ` AND s.branch = $${params.length}`; }
-  if (date) { params.push(date); query += ` AND s.sale_date = $${params.length}`; }
-  if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
-  if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
-  query += ' ORDER BY s.branch, s.sale_date, s.id, si.id';
-
-  const { rows } = await pool.query(query, params);
-  const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=sales_${from || date || 'all'}_${to || ''}.pdf`);
-  doc.pipe(res);
-
-  const title = `Sales Report — ${effectiveBranch || 'All Branches'} — ${from ? `${from} to ${to}` : date || 'All Dates'}`;
-  doc.fontSize(14).font('Helvetica-Bold').text(title, { align: 'center' });
-  doc.moveDown(0.5);
-
-  const cols = ['Branch', 'Date', 'Customer', 'Item', 'Serial/IMEI', 'Inv.Value', 'Payment', 'Salesperson', 'Out'];
-  const widths = [50, 60, 90, 110, 90, 60, 70, 70, 40];
-  let x = 30;
-  const y = doc.y;
-
-  doc.fontSize(7).font('Helvetica-Bold');
-  cols.forEach((col, i) => {
-    doc.rect(x, y, widths[i], 18).fillAndStroke('#4F46E5', '#4F46E5');
-    doc.fillColor('white').text(col, x + 2, y + 4, { width: widths[i] - 4 });
-    x += widths[i];
-  });
-  doc.fillColor('black');
-
-  let rowY = y + 18;
-  rows.forEach((r, idx) => {
-    x = 30;
-    const bg = idx % 2 === 0 ? '#F8F7FF' : '#FFFFFF';
-    const values = [
-      r.branch,
-      r.sale_date ? new Date(r.sale_date).toLocaleDateString() : '',
-      r.customer_name, r.item_description, r.serial_imei,
-      r.invoice_value ? `Rs.${Number(r.invoice_value).toLocaleString()}` : '',
-      r.payment_method, r.sales_person, r.out_status
-    ];
-    doc.fontSize(6).font('Helvetica');
-    values.forEach((val, i) => {
-      doc.rect(x, rowY, widths[i], 16).fillAndStroke(bg, '#DDDDDD');
-      doc.fillColor('black').text(String(val || ''), x + 2, rowY + 4, { width: widths[i] - 4 });
-      x += widths[i];
-    });
-    rowY += 16;
-    if (rowY > 540) { doc.addPage({ layout: 'landscape' }); rowY = 30; }
-  });
-
-  doc.end();
-});
-
-// SUPPLIER REPORT
-router.get('/supplier-report', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { from, to, branch } = req.query;
-
-  try {
-    let query = `
-      SELECT s.branch, s.sale_date, s.customer_name, s.contact, s.inv_no,
-             s.payment_method, s.sales_person,
-             si.item_description, si.serial_imei,
-             si.supplier_name, si.cost, si.invoice_value
-      FROM sales s
-      JOIN sale_items si ON si.sale_id = s.id
-      WHERE si.supplier_name IS NOT NULL AND si.supplier_name != ''
-    `;
-    const params = [];
-    if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
-    if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
-    if (branch) { params.push(branch); query += ` AND s.branch = $${params.length}`; }
-    query += ' ORDER BY si.supplier_name, s.sale_date, s.id';
-
-    const { rows } = await pool.query(query, params);
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// SUPPLIER REPORT EXPORT EXCEL
-router.get('/supplier-report/export/excel', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { from, to, branch } = req.query;
-
-  let query = `
-    SELECT si.supplier_name, s.sale_date, s.branch, s.customer_name,
-           si.item_description, si.serial_imei, si.cost, si.invoice_value,
-           (COALESCE(si.invoice_value, 0) - COALESCE(si.cost, 0)) as profit
-    FROM sales s
-    JOIN sale_items si ON si.sale_id = s.id
-    WHERE si.supplier_name IS NOT NULL AND si.supplier_name != ''
-  `;
-  const params = [];
-  if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
-  if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
-  if (branch) { params.push(branch); query += ` AND s.branch = $${params.length}`; }
-  query += ' ORDER BY si.supplier_name, s.sale_date';
-
-  const { rows } = await pool.query(query, params);
-  const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet('Supplier Report');
-
-  sheet.columns = [
-    { header: 'Supplier', key: 'supplier_name', width: 20 },
-    { header: 'Date', key: 'sale_date', width: 12 },
-    { header: 'Branch', key: 'branch', width: 10 },
-    { header: 'Customer', key: 'customer_name', width: 20 },
-    { header: 'Item Description', key: 'item_description', width: 30 },
-    { header: 'Serial/IMEI', key: 'serial_imei', width: 20 },
-    { header: 'Cost', key: 'cost', width: 14 },
-    { header: 'Invoice Value', key: 'invoice_value', width: 14 },
-    { header: 'Profit', key: 'profit', width: 14 },
-  ];
-
-  sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } };
-  rows.forEach(r => sheet.addRow(r));
-
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename=supplier_report_${from || 'all'}_${to || ''}.xlsx`);
-  await workbook.xlsx.write(res);
-  res.end();
-});
-
-// SUPPLIER REPORT EXPORT PDF
-router.get('/supplier-report/export/pdf', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { from, to, branch } = req.query;
-
-  let query = `
-    SELECT si.supplier_name, s.sale_date, s.branch, s.customer_name,
-           si.item_description, si.serial_imei, si.cost, si.invoice_value,
-           (COALESCE(si.invoice_value, 0) - COALESCE(si.cost, 0)) as profit
-    FROM sales s
-    JOIN sale_items si ON si.sale_id = s.id
-    WHERE si.supplier_name IS NOT NULL AND si.supplier_name != ''
-  `;
-  const params = [];
-  if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
-  if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
-  if (branch) { params.push(branch); query += ` AND s.branch = $${params.length}`; }
-  query += ' ORDER BY si.supplier_name, s.sale_date';
-
-  const { rows } = await pool.query(query, params);
-  const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=supplier_report_${from || 'all'}_${to || ''}.pdf`);
-  doc.pipe(res);
-
-  doc.fontSize(14).font('Helvetica-Bold').text(
-    `Supplier Report — ${branch || 'All Branches'} — ${from || ''} to ${to || ''}`,
-    { align: 'center' }
-  );
-  doc.moveDown(0.5);
-
-  const cols = ['Supplier', 'Date', 'Branch', 'Customer', 'Item', 'Serial/IMEI', 'Cost', 'Invoice', 'Profit'];
-  const widths = [80, 55, 50, 80, 110, 80, 55, 55, 55];
-  let x = 30;
-  const y = doc.y;
-
-  doc.fontSize(7).font('Helvetica-Bold');
-  cols.forEach((col, i) => {
-    doc.rect(x, y, widths[i], 18).fillAndStroke('#4F46E5', '#4F46E5');
-    doc.fillColor('white').text(col, x + 2, y + 4, { width: widths[i] - 4 });
-    x += widths[i];
-  });
-  doc.fillColor('black');
-
-  let rowY = y + 18;
-  let currentSupplier = null;
-
-  rows.forEach((r, idx) => {
-    if (r.supplier_name !== currentSupplier) {
-      currentSupplier = r.supplier_name;
-      const totalW = widths.reduce((a, b) => a + b, 0);
-      doc.rect(30, rowY, totalW, 14).fillAndStroke('#EEF2FF', '#EEF2FF');
-      doc.fontSize(7).font('Helvetica-Bold').fillColor('#4F46E5').text(
-        `${currentSupplier}`, 34, rowY + 3, { width: totalW - 8 }
-      );
-      rowY += 14;
-    }
-
-    x = 30;
-    const bg = idx % 2 === 0 ? '#FFFFFF' : '#F8F7FF';
-    const values = [
-      r.supplier_name,
-      r.sale_date ? new Date(r.sale_date).toLocaleDateString() : '',
-      r.branch, r.customer_name, r.item_description, r.serial_imei,
-      r.cost ? `Rs.${Number(r.cost).toLocaleString()}` : '-',
-      r.invoice_value ? `Rs.${Number(r.invoice_value).toLocaleString()}` : '-',
-      r.profit ? `Rs.${Number(r.profit).toLocaleString()}` : '-',
-    ];
-    doc.fontSize(6).font('Helvetica');
-    values.forEach((val, i) => {
-      doc.rect(x, rowY, widths[i], 16).fillAndStroke(bg, '#DDDDDD');
-      doc.fillColor('black').text(String(val || ''), x + 2, rowY + 4, { width: widths[i] - 4 });
-      x += widths[i];
-    });
-    rowY += 16;
-    if (rowY > 540) {
-      doc.addPage({ layout: 'landscape' });
-      rowY = 30;
-      currentSupplier = null;
-    }
-  });
-
-  doc.end();
 });
 
 module.exports = router;
