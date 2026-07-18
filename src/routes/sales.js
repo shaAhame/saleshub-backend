@@ -63,7 +63,7 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-// EXPORT Excel — must be before /:id
+// EXPORT Excel — before /:id
 router.get('/export/excel', auth, async (req, res) => {
   const { date, branch, from, to } = req.query;
   const userBranch = branchGuard(req);
@@ -119,7 +119,7 @@ router.get('/export/excel', auth, async (req, res) => {
   res.end();
 });
 
-// EXPORT PDF — must be before /:id
+// EXPORT PDF — before /:id
 router.get('/export/pdf', auth, async (req, res) => {
   const { date, branch, from, to } = req.query;
   const userBranch = branchGuard(req);
@@ -187,7 +187,7 @@ router.get('/export/pdf', auth, async (req, res) => {
   doc.end();
 });
 
-// SUPPLIER REPORT — must be before /:id
+// SUPPLIER REPORT — before /:id
 router.get('/supplier-report', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const { from, to, branch } = req.query;
@@ -215,10 +215,10 @@ router.get('/supplier-report', auth, async (req, res) => {
   }
 });
 
-// SUPPLIER REPORT EXPORT EXCEL — must be before /:id
+// SUPPLIER REPORT EXPORT EXCEL — before /:id
 router.get('/supplier-report/export/excel', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { from, to, branch } = req.query;
+  const { from, to, branch, supplier } = req.query;
 
   let query = `
     SELECT si.supplier_name, s.sale_date, s.branch, s.customer_name,
@@ -232,6 +232,7 @@ router.get('/supplier-report/export/excel', auth, async (req, res) => {
   if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
   if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
   if (branch) { params.push(branch); query += ` AND s.branch = $${params.length}`; }
+  if (supplier) { params.push(`%${supplier}%`); query += ` AND si.supplier_name ILIKE $${params.length}`; }
   query += ' ORDER BY si.supplier_name, s.sale_date';
 
   const { rows } = await pool.query(query, params);
@@ -260,10 +261,10 @@ router.get('/supplier-report/export/excel', auth, async (req, res) => {
   res.end();
 });
 
-// SUPPLIER REPORT EXPORT PDF — must be before /:id
+// SUPPLIER REPORT EXPORT PDF — before /:id
 router.get('/supplier-report/export/pdf', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { from, to, branch } = req.query;
+  const { from, to, branch, supplier } = req.query;
 
   let query = `
     SELECT si.supplier_name, s.sale_date, s.branch, s.customer_name,
@@ -277,70 +278,143 @@ router.get('/supplier-report/export/pdf', auth, async (req, res) => {
   if (from) { params.push(from); query += ` AND s.sale_date >= $${params.length}`; }
   if (to) { params.push(to); query += ` AND s.sale_date <= $${params.length}`; }
   if (branch) { params.push(branch); query += ` AND s.branch = $${params.length}`; }
+  if (supplier) { params.push(`%${supplier}%`); query += ` AND si.supplier_name ILIKE $${params.length}`; }
   query += ' ORDER BY si.supplier_name, s.sale_date';
 
   const { rows } = await pool.query(query, params);
-  const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
+
+  const doc = new PDFDocument({ margin: 40, size: 'A4', layout: 'landscape', autoFirstPage: true });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename=supplier_report_${from || 'all'}_${to || ''}.pdf`);
   doc.pipe(res);
 
-  doc.fontSize(14).font('Helvetica-Bold').text(
-    `Supplier Report — ${branch || 'All Branches'} — ${from || ''} to ${to || ''}`,
-    { align: 'center' }
-  );
-  doc.moveDown(0.5);
+  doc.fontSize(14).font('Helvetica-Bold')
+    .text(`Supplier Report — ${branch || 'All Branches'} — ${from || ''} to ${to || ''}`, { align: 'center' });
+  doc.fontSize(9).font('Helvetica').fillColor('#6B7280')
+    .text(`Generated: ${new Date().toLocaleDateString()}`, { align: 'center' });
+  doc.moveDown(1);
 
-  const cols = ['Supplier', 'Date', 'Branch', 'Customer', 'Item', 'Serial/IMEI', 'Cost', 'Invoice', 'Profit'];
-  const widths = [80, 55, 50, 80, 110, 80, 55, 55, 55];
-  let x = 30;
-  const y = doc.y;
+  if (rows.length === 0) {
+    doc.fontSize(12).fillColor('#111827').text('No data found for the selected filters.', { align: 'center' });
+    doc.end();
+    return;
+  }
 
-  doc.fontSize(7).font('Helvetica-Bold');
-  cols.forEach((col, i) => {
-    doc.rect(x, y, widths[i], 18).fillAndStroke('#4F46E5', '#4F46E5');
-    doc.fillColor('white').text(col, x + 2, y + 4, { width: widths[i] - 4 });
-    x += widths[i];
-  });
-  doc.fillColor('black');
+  const groups = rows.reduce((acc, row) => {
+    const key = row.supplier_name;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(row);
+    return acc;
+  }, {});
 
-  let rowY = y + 18;
-  let currentSupplier = null;
+  const cols = ['No', 'Date', 'Branch', 'Customer', 'Item Description', 'Serial/IMEI', 'Cost', 'Invoice', 'Profit'];
+  const widths = [25, 60, 50, 90, 130, 90, 60, 60, 60];
+  const tableWidth = widths.reduce((a, b) => a + b, 0);
+  const startX = 40;
+  const pageBottom = doc.page.height - 60;
 
-  rows.forEach((r, idx) => {
-    if (r.supplier_name !== currentSupplier) {
-      currentSupplier = r.supplier_name;
-      const totalW = widths.reduce((a, b) => a + b, 0);
-      doc.rect(30, rowY, totalW, 14).fillAndStroke('#EEF2FF', '#EEF2FF');
-      doc.fontSize(7).font('Helvetica-Bold').fillColor('#4F46E5').text(
-        `${currentSupplier}`, 34, rowY + 3, { width: totalW - 8 }
-      );
-      rowY += 14;
-    }
-
-    x = 30;
-    const bg = idx % 2 === 0 ? '#FFFFFF' : '#F8F7FF';
-    const values = [
-      r.supplier_name,
-      r.sale_date ? new Date(r.sale_date).toLocaleDateString() : '',
-      r.branch, r.customer_name, r.item_description, r.serial_imei,
-      r.cost ? `Rs.${Number(r.cost).toLocaleString()}` : '-',
-      r.invoice_value ? `Rs.${Number(r.invoice_value).toLocaleString()}` : '-',
-      r.profit ? `Rs.${Number(r.profit).toLocaleString()}` : '-',
-    ];
-    doc.fontSize(6).font('Helvetica');
-    values.forEach((val, i) => {
-      doc.rect(x, rowY, widths[i], 16).fillAndStroke(bg, '#DDDDDD');
-      doc.fillColor('black').text(String(val || ''), x + 2, rowY + 4, { width: widths[i] - 4 });
+  const drawHeaders = (yPos) => {
+    let x = startX;
+    doc.fontSize(7).font('Helvetica-Bold');
+    cols.forEach((col, i) => {
+      doc.rect(x, yPos, widths[i], 18).fillAndStroke('#4F46E5', '#4F46E5');
+      doc.fillColor('white').text(col, x + 2, yPos + 5, { width: widths[i] - 4, align: 'left' });
       x += widths[i];
     });
-    rowY += 16;
-    if (rowY > 540) {
-      doc.addPage({ layout: 'landscape' });
-      rowY = 30;
-      currentSupplier = null;
+    doc.fillColor('black');
+    return yPos + 18;
+  };
+
+  let currentY = doc.y;
+
+  Object.entries(groups).forEach(([supplierName, items]) => {
+    if (currentY + 60 > pageBottom) {
+      doc.addPage();
+      currentY = 40;
     }
+
+    // Supplier header bar
+    doc.rect(startX, currentY, tableWidth, 20).fillAndStroke('#1E1B4B', '#1E1B4B');
+    doc.fontSize(9).font('Helvetica-Bold').fillColor('white')
+      .text(`${supplierName}  (${items.length} items)`, startX + 6, currentY + 5, { width: tableWidth - 12 });
+    currentY += 20;
+
+    currentY = drawHeaders(currentY);
+
+    items.forEach((r, idx) => {
+      if (currentY + 18 > pageBottom) {
+        doc.addPage();
+        currentY = 40;
+        doc.rect(startX, currentY, tableWidth, 16).fillAndStroke('#1E1B4B', '#1E1B4B');
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('white')
+          .text(`${supplierName} (continued)`, startX + 4, currentY + 4);
+        currentY += 16;
+        currentY = drawHeaders(currentY);
+      }
+
+      let x = startX;
+      const bg = idx % 2 === 0 ? '#FFFFFF' : '#F8F7FF';
+      const values = [
+        idx + 1,
+        r.sale_date ? new Date(r.sale_date).toLocaleDateString() : '',
+        r.branch,
+        r.customer_name || '',
+        r.item_description || '',
+        r.serial_imei || '',
+        r.cost ? `Rs.${Number(r.cost).toLocaleString()}` : '-',
+        r.invoice_value ? `Rs.${Number(r.invoice_value).toLocaleString()}` : '-',
+        r.profit ? `Rs.${Number(r.profit).toLocaleString()}` : '-',
+      ];
+
+      doc.fontSize(6).font('Helvetica');
+      values.forEach((val, i) => {
+        doc.rect(x, currentY, widths[i], 16).fillAndStroke(bg, '#DDDDDD');
+        doc.fillColor('black').text(String(val || ''), x + 2, currentY + 4, { width: widths[i] - 4 });
+        x += widths[i];
+      });
+      currentY += 16;
+    });
+
+    // Supplier total row
+    const totalCost = items.reduce((s, r) => s + parseFloat(r.cost || 0), 0);
+    const totalInvoice = items.reduce((s, r) => s + parseFloat(r.invoice_value || 0), 0);
+    const totalProfit = totalInvoice - totalCost;
+
+    if (currentY + 18 > pageBottom) { doc.addPage(); currentY = 40; }
+
+    let x = startX;
+    const totalValues = ['', '', '', '', '', 'TOTAL',
+      `Rs.${totalCost.toLocaleString()}`,
+      `Rs.${totalInvoice.toLocaleString()}`,
+      `Rs.${totalProfit.toLocaleString()}`
+    ];
+    doc.fontSize(7).font('Helvetica-Bold');
+    totalValues.forEach((val, i) => {
+      doc.rect(x, currentY, widths[i], 16).fillAndStroke('#EEF2FF', '#EEF2FF');
+      doc.fillColor(
+        i === 6 ? '#991B1B' :
+        i === 7 ? '#065F46' :
+        i === 8 ? (totalProfit >= 0 ? '#065F46' : '#991B1B') :
+        '#4F46E5'
+      ).text(String(val), x + 2, currentY + 4, { width: widths[i] - 4 });
+      x += widths[i];
+    });
+    currentY += 16;
+    currentY += 14;
   });
+
+  // Grand Total
+  if (currentY + 30 > pageBottom) { doc.addPage(); currentY = 40; }
+  const grandCost = rows.reduce((s, r) => s + parseFloat(r.cost || 0), 0);
+  const grandInvoice = rows.reduce((s, r) => s + parseFloat(r.invoice_value || 0), 0);
+  const grandProfit = grandInvoice - grandCost;
+
+  doc.rect(startX, currentY, tableWidth, 22).fillAndStroke('#1E1B4B', '#1E1B4B');
+  doc.fontSize(8).font('Helvetica-Bold').fillColor('white')
+    .text(
+      `GRAND TOTAL  |  Cost: Rs.${grandCost.toLocaleString()}  |  Invoice: Rs.${grandInvoice.toLocaleString()}  |  Profit: Rs.${grandProfit.toLocaleString()}`,
+      startX + 6, currentY + 7, { width: tableWidth - 12 }
+    );
 
   doc.end();
 });
