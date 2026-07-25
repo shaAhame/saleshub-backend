@@ -18,8 +18,11 @@ router.get('/', auth, async (req, res) => {
   try {
     if (imei) {
       let query = `
-        SELECT s.*, si.item_description, si.serial_imei, si.invoice_value as item_invoice_value,
-               si.cost as item_cost, si.supplier_name as item_supplier
+        SELECT s.*, si.item_description, si.serial_imei,
+               si.invoice_value as item_invoice_value,
+               si.cost as item_cost,
+               si.supplier_name as item_supplier,
+               si.qty as item_qty
         FROM sales s
         JOIN sale_items si ON si.sale_id = s.id
         WHERE si.serial_imei ILIKE $1
@@ -53,7 +56,8 @@ router.get('/', auth, async (req, res) => {
       });
       sales.forEach(s => {
         s.items = itemsBySaleId[s.id] || [];
-        s.total_invoice_value = s.items.reduce((sum, item) => sum + parseFloat(item.invoice_value || 0), 0);
+        s.total_invoice_value = s.items.reduce((sum, item) =>
+          sum + (parseFloat(item.invoice_value || 0) * parseInt(item.qty || 1)), 0);
       });
     }
 
@@ -71,7 +75,10 @@ router.get('/export/excel', auth, async (req, res) => {
 
   let query = `
     SELECT s.branch, s.sale_date, s.inv_no, s.acc_inv_no, s.customer_name, s.contact,
-           si.item_description, si.serial_imei, si.invoice_value, si.cost, si.supplier_name,
+           si.item_description, si.serial_imei, si.qty,
+           si.invoice_value as unit_price,
+           (si.invoice_value * COALESCE(si.qty, 1)) as total_value,
+           si.cost, si.supplier_name,
            s.payment_method, s.sales_person, s.out_status, s.cashier,
            s.google_review, s.remarks
     FROM sales s
@@ -98,7 +105,9 @@ router.get('/export/excel', auth, async (req, res) => {
     { header: 'Contact', key: 'contact', width: 14 },
     { header: 'Item Description', key: 'item_description', width: 28 },
     { header: 'Serial/IMEI', key: 'serial_imei', width: 20 },
-    { header: 'Invoice Value', key: 'invoice_value', width: 14 },
+    { header: 'Qty', key: 'qty', width: 6 },
+    { header: 'Unit Price', key: 'unit_price', width: 14 },
+    { header: 'Total Value', key: 'total_value', width: 14 },
     { header: 'Cost', key: 'cost', width: 12 },
     { header: 'Supplier', key: 'supplier_name', width: 18 },
     { header: 'Payment Method', key: 'payment_method', width: 16 },
@@ -127,7 +136,9 @@ router.get('/export/pdf', auth, async (req, res) => {
 
   let query = `
     SELECT s.branch, s.sale_date, s.customer_name, s.inv_no,
-           si.item_description, si.serial_imei, si.invoice_value,
+           si.item_description, si.serial_imei, si.qty,
+           si.invoice_value,
+           (si.invoice_value * COALESCE(si.qty, 1)) as total_value,
            s.payment_method, s.sales_person, s.out_status
     FROM sales s
     LEFT JOIN sale_items si ON si.sale_id = s.id
@@ -150,8 +161,8 @@ router.get('/export/pdf', auth, async (req, res) => {
   doc.fontSize(14).font('Helvetica-Bold').text(title, { align: 'center' });
   doc.moveDown(0.5);
 
-  const cols = ['Branch', 'Date', 'Customer', 'Item', 'Serial/IMEI', 'Inv.Value', 'Payment', 'Salesperson', 'Out'];
-  const widths = [50, 60, 90, 110, 90, 60, 70, 70, 40];
+  const cols = ['Branch', 'Date', 'Customer', 'Item', 'IMEI', 'Qty', 'Unit Price', 'Total', 'Payment', 'Out'];
+  const widths = [45, 55, 80, 100, 80, 25, 55, 60, 65, 35];
   let x = 30;
   const y = doc.y;
 
@@ -171,8 +182,10 @@ router.get('/export/pdf', auth, async (req, res) => {
       r.branch,
       r.sale_date ? new Date(r.sale_date).toLocaleDateString() : '',
       r.customer_name, r.item_description, r.serial_imei,
+      r.qty || 1,
       r.invoice_value ? `Rs.${Number(r.invoice_value).toLocaleString()}` : '',
-      r.payment_method, r.sales_person, r.out_status
+      r.total_value ? `Rs.${Number(r.total_value).toLocaleString()}` : '',
+      r.payment_method, r.out_status
     ];
     doc.fontSize(6).font('Helvetica');
     values.forEach((val, i) => {
@@ -197,7 +210,7 @@ router.get('/supplier-report', auth, async (req, res) => {
       SELECT s.branch, s.sale_date, s.customer_name, s.contact, s.inv_no,
              s.payment_method, s.sales_person,
              si.item_description, si.serial_imei,
-             si.supplier_name, si.cost, si.invoice_value
+             si.supplier_name, si.cost, si.invoice_value, si.qty
       FROM sales s
       JOIN sale_items si ON si.sale_id = s.id
       WHERE si.supplier_name IS NOT NULL AND si.supplier_name != ''
@@ -222,8 +235,10 @@ router.get('/supplier-report/export/excel', auth, async (req, res) => {
 
   let query = `
     SELECT si.supplier_name, s.sale_date, s.branch, s.customer_name,
-           si.item_description, si.serial_imei, si.cost, si.invoice_value,
-           (COALESCE(si.invoice_value, 0) - COALESCE(si.cost, 0)) as profit
+           si.item_description, si.serial_imei, si.qty,
+           si.cost, si.invoice_value as unit_price,
+           (COALESCE(si.invoice_value, 0) * COALESCE(si.qty, 1)) as total_value,
+           (COALESCE(si.invoice_value, 0) * COALESCE(si.qty, 1)) - (COALESCE(si.cost, 0) * COALESCE(si.qty, 1)) as profit
     FROM sales s
     JOIN sale_items si ON si.sale_id = s.id
     WHERE si.supplier_name IS NOT NULL AND si.supplier_name != ''
@@ -246,8 +261,10 @@ router.get('/supplier-report/export/excel', auth, async (req, res) => {
     { header: 'Customer', key: 'customer_name', width: 20 },
     { header: 'Item Description', key: 'item_description', width: 30 },
     { header: 'Serial/IMEI', key: 'serial_imei', width: 20 },
+    { header: 'Qty', key: 'qty', width: 6 },
     { header: 'Cost', key: 'cost', width: 14 },
-    { header: 'Invoice Value', key: 'invoice_value', width: 14 },
+    { header: 'Unit Price', key: 'unit_price', width: 14 },
+    { header: 'Total Value', key: 'total_value', width: 14 },
     { header: 'Profit', key: 'profit', width: 14 },
   ];
 
@@ -268,8 +285,10 @@ router.get('/supplier-report/export/pdf', auth, async (req, res) => {
 
   let query = `
     SELECT si.supplier_name, s.sale_date, s.branch, s.customer_name,
-           si.item_description, si.serial_imei, si.cost, si.invoice_value,
-           (COALESCE(si.invoice_value, 0) - COALESCE(si.cost, 0)) as profit
+           si.item_description, si.serial_imei, si.qty,
+           si.cost, si.invoice_value,
+           (COALESCE(si.invoice_value, 0) * COALESCE(si.qty, 1)) as total_value,
+           (COALESCE(si.invoice_value, 0) * COALESCE(si.qty, 1)) - (COALESCE(si.cost, 0) * COALESCE(si.qty, 1)) as profit
     FROM sales s
     JOIN sale_items si ON si.sale_id = s.id
     WHERE si.supplier_name IS NOT NULL AND si.supplier_name != ''
@@ -307,15 +326,15 @@ router.get('/supplier-report/export/pdf', auth, async (req, res) => {
     return acc;
   }, {});
 
-  const cols = ['No', 'Date', 'Branch', 'Customer', 'Item Description', 'Serial/IMEI', 'Cost', 'Invoice', 'Profit'];
-  const widths = [25, 60, 50, 90, 130, 90, 60, 60, 60];
+  const cols = ['No', 'Date', 'Branch', 'Customer', 'Item', 'IMEI', 'Qty', 'Cost', 'Unit Price', 'Total', 'Profit'];
+  const widths = [22, 55, 45, 75, 100, 75, 22, 50, 55, 55, 50];
   const tableWidth = widths.reduce((a, b) => a + b, 0);
   const startX = 40;
   const pageBottom = doc.page.height - 60;
 
   const drawHeaders = (yPos) => {
     let x = startX;
-    doc.fontSize(7).font('Helvetica-Bold');
+    doc.fontSize(6).font('Helvetica-Bold');
     cols.forEach((col, i) => {
       doc.rect(x, yPos, widths[i], 18).fillAndStroke('#4F46E5', '#4F46E5');
       doc.fillColor('white').text(col, x + 2, yPos + 5, { width: widths[i] - 4, align: 'left' });
@@ -333,12 +352,10 @@ router.get('/supplier-report/export/pdf', auth, async (req, res) => {
       currentY = 40;
     }
 
-    // Supplier header bar
     doc.rect(startX, currentY, tableWidth, 20).fillAndStroke('#1E1B4B', '#1E1B4B');
     doc.fontSize(9).font('Helvetica-Bold').fillColor('white')
       .text(`${supplierName}  (${items.length} items)`, startX + 6, currentY + 5, { width: tableWidth - 12 });
     currentY += 20;
-
     currentY = drawHeaders(currentY);
 
     items.forEach((r, idx) => {
@@ -357,12 +374,11 @@ router.get('/supplier-report/export/pdf', auth, async (req, res) => {
       const values = [
         idx + 1,
         r.sale_date ? new Date(r.sale_date).toLocaleDateString() : '',
-        r.branch,
-        r.customer_name || '',
-        r.item_description || '',
-        r.serial_imei || '',
+        r.branch, r.customer_name, r.item_description, r.serial_imei,
+        r.qty || 1,
         r.cost ? `Rs.${Number(r.cost).toLocaleString()}` : '-',
         r.invoice_value ? `Rs.${Number(r.invoice_value).toLocaleString()}` : '-',
+        r.total_value ? `Rs.${Number(r.total_value).toLocaleString()}` : '-',
         r.profit ? `Rs.${Number(r.profit).toLocaleString()}` : '-',
       ];
 
@@ -376,25 +392,21 @@ router.get('/supplier-report/export/pdf', auth, async (req, res) => {
     });
 
     // Supplier total row
-    const totalCost = items.reduce((s, r) => s + parseFloat(r.cost || 0), 0);
-    const totalInvoice = items.reduce((s, r) => s + parseFloat(r.invoice_value || 0), 0);
-    const totalProfit = totalInvoice - totalCost;
+    const totalCost = items.reduce((s, r) => s + (parseFloat(r.cost || 0) * parseInt(r.qty || 1)), 0);
+    const totalValue = items.reduce((s, r) => s + parseFloat(r.total_value || 0), 0);
+    const totalProfit = items.reduce((s, r) => s + parseFloat(r.profit || 0), 0);
 
     if (currentY + 18 > pageBottom) { doc.addPage(); currentY = 40; }
 
     let x = startX;
-    const totalValues = ['', '', '', '', '', 'TOTAL',
-      `Rs.${totalCost.toLocaleString()}`,
-      `Rs.${totalInvoice.toLocaleString()}`,
-      `Rs.${totalProfit.toLocaleString()}`
-    ];
+    const totalValues = ['', '', '', '', '', 'TOTAL', '', `Rs.${totalCost.toLocaleString()}`, '', `Rs.${totalValue.toLocaleString()}`, `Rs.${totalProfit.toLocaleString()}`];
     doc.fontSize(7).font('Helvetica-Bold');
     totalValues.forEach((val, i) => {
       doc.rect(x, currentY, widths[i], 16).fillAndStroke('#EEF2FF', '#EEF2FF');
       doc.fillColor(
-        i === 6 ? '#991B1B' :
-        i === 7 ? '#065F46' :
-        i === 8 ? (totalProfit >= 0 ? '#065F46' : '#991B1B') :
+        i === 7 ? '#991B1B' :
+        i === 9 ? '#065F46' :
+        i === 10 ? (totalProfit >= 0 ? '#065F46' : '#991B1B') :
         '#4F46E5'
       ).text(String(val), x + 2, currentY + 4, { width: widths[i] - 4 });
       x += widths[i];
@@ -405,14 +417,14 @@ router.get('/supplier-report/export/pdf', auth, async (req, res) => {
 
   // Grand Total
   if (currentY + 30 > pageBottom) { doc.addPage(); currentY = 40; }
-  const grandCost = rows.reduce((s, r) => s + parseFloat(r.cost || 0), 0);
-  const grandInvoice = rows.reduce((s, r) => s + parseFloat(r.invoice_value || 0), 0);
-  const grandProfit = grandInvoice - grandCost;
+  const grandCost = rows.reduce((s, r) => s + (parseFloat(r.cost || 0) * parseInt(r.qty || 1)), 0);
+  const grandValue = rows.reduce((s, r) => s + parseFloat(r.total_value || 0), 0);
+  const grandProfit = rows.reduce((s, r) => s + parseFloat(r.profit || 0), 0);
 
   doc.rect(startX, currentY, tableWidth, 22).fillAndStroke('#1E1B4B', '#1E1B4B');
   doc.fontSize(8).font('Helvetica-Bold').fillColor('white')
     .text(
-      `GRAND TOTAL  |  Cost: Rs.${grandCost.toLocaleString()}  |  Invoice: Rs.${grandInvoice.toLocaleString()}  |  Profit: Rs.${grandProfit.toLocaleString()}`,
+      `GRAND TOTAL  |  Cost: Rs.${grandCost.toLocaleString()}  |  Total Value: Rs.${grandValue.toLocaleString()}  |  Profit: Rs.${grandProfit.toLocaleString()}`,
       startX + 6, currentY + 7, { width: tableWidth - 12 }
     );
 
@@ -451,8 +463,11 @@ router.post('/', auth, async (req, res) => {
   try {
     await client.query('BEGIN');
     const effectiveOutStatus = req.user.role === 'admin' ? (out_status || 'NO') : 'NO';
-    const totalInvoiceValue = items.reduce((sum, item) => sum + parseFloat(item.invoice_value || 0), 0);
-    const totalCost = items.reduce((sum, item) => sum + parseFloat(item.cost || 0), 0);
+
+    const totalInvoiceValue = items.reduce((sum, item) =>
+      sum + (parseFloat(item.invoice_value || 0) * parseInt(item.qty || 1)), 0);
+    const totalCost = items.reduce((sum, item) =>
+      sum + (parseFloat(item.cost || 0) * parseInt(item.qty || 1)), 0);
 
     const saleResult = await client.query(`
       INSERT INTO sales (branch, sale_date, inv_no, acc_inv_no, customer_name, contact,
@@ -470,9 +485,10 @@ router.post('/', auth, async (req, res) => {
     for (const item of items) {
       if (item.item_description || item.serial_imei) {
         await client.query(
-          'INSERT INTO sale_items (sale_id, item_description, serial_imei, invoice_value, cost, supplier_name) VALUES ($1,$2,$3,$4,$5,$6)',
+          'INSERT INTO sale_items (sale_id, item_description, serial_imei, invoice_value, cost, supplier_name, qty) VALUES ($1,$2,$3,$4,$5,$6,$7)',
           [sale.id, item.item_description || null, item.serial_imei || null,
-           item.invoice_value || null, item.cost || null, item.supplier_name || null]
+           item.invoice_value || null, item.cost || null,
+           item.supplier_name || null, parseInt(item.qty || 1)]
         );
       }
     }
@@ -503,8 +519,10 @@ router.put('/:id', auth, async (req, res) => {
   } = req.body;
 
   const effectiveOutStatus = req.user.role === 'admin' ? out_status : existing.rows[0].out_status;
-  const totalInvoiceValue = items.reduce((sum, item) => sum + parseFloat(item.invoice_value || 0), 0);
-  const totalCost = items.reduce((sum, item) => sum + parseFloat(item.cost || 0), 0);
+  const totalInvoiceValue = items.reduce((sum, item) =>
+    sum + (parseFloat(item.invoice_value || 0) * parseInt(item.qty || 1)), 0);
+  const totalCost = items.reduce((sum, item) =>
+    sum + (parseFloat(item.cost || 0) * parseInt(item.qty || 1)), 0);
 
   const client = await pool.connect();
   try {
@@ -524,9 +542,10 @@ router.put('/:id', auth, async (req, res) => {
     for (const item of items) {
       if (item.item_description || item.serial_imei) {
         await client.query(
-          'INSERT INTO sale_items (sale_id, item_description, serial_imei, invoice_value, cost, supplier_name) VALUES ($1,$2,$3,$4,$5,$6)',
+          'INSERT INTO sale_items (sale_id, item_description, serial_imei, invoice_value, cost, supplier_name, qty) VALUES ($1,$2,$3,$4,$5,$6,$7)',
           [req.params.id, item.item_description || null, item.serial_imei || null,
-           item.invoice_value || null, item.cost || null, item.supplier_name || null]
+           item.invoice_value || null, item.cost || null,
+           item.supplier_name || null, parseInt(item.qty || 1)]
         );
       }
     }
