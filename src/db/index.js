@@ -2,7 +2,10 @@ const { Pool } = require('pg');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  max: 5,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000
 });
 
 const initDB = async () => {
@@ -29,10 +32,10 @@ const initDB = async () => {
       out_status VARCHAR(10) DEFAULT 'NO',
       cashier VARCHAR(100),
       invoice_value NUMERIC(12,2),
+      cost NUMERIC(12,2),
       google_review VARCHAR(10),
       remarks TEXT,
       supplier_name VARCHAR(255),
-      cost NUMERIC(12,2),
       created_by INTEGER REFERENCES users(id),
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
@@ -46,6 +49,7 @@ const initDB = async () => {
       invoice_value NUMERIC(12,2),
       cost NUMERIC(12,2),
       supplier_name VARCHAR(255),
+      qty INTEGER DEFAULT 1,
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -73,10 +77,11 @@ const initDB = async () => {
     console.log('✅ Default users seeded');
   }
 
-  // Add new columns to sale_items if not exist
+  // Add columns if not exist (safe for existing deployments)
   try { await pool.query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS invoice_value NUMERIC(12,2)`); } catch(e) {}
   try { await pool.query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS cost NUMERIC(12,2)`); } catch(e) {}
   try { await pool.query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(255)`); } catch(e) {}
+  try { await pool.query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS qty INTEGER DEFAULT 1`); } catch(e) {}
   try { await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS item_description TEXT`); } catch(e) {}
   try { await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS serial_imei VARCHAR(100)`); } catch(e) {}
 
@@ -92,13 +97,24 @@ const initDB = async () => {
     for (const sale of oldSales.rows) {
       if (sale.item_description || sale.serial_imei) {
         await pool.query(
-          'INSERT INTO sale_items (sale_id, item_description, serial_imei, invoice_value, cost, supplier_name) VALUES ($1,$2,$3,$4,$5,$6)',
-          [sale.id, sale.item_description || null, sale.serial_imei || null, sale.invoice_value || null, sale.cost || null, sale.supplier_name || null]
+          'INSERT INTO sale_items (sale_id, item_description, serial_imei, invoice_value, cost, supplier_name, qty) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+          [sale.id, sale.item_description || null, sale.serial_imei || null,
+           sale.invoice_value || null, sale.cost || null, sale.supplier_name || null, 1]
         );
       }
     }
     console.log('✅ Migration complete!');
   }
+
+  // Keep alive ping every 14 minutes
+  setInterval(async () => {
+    try {
+      await pool.query('SELECT 1');
+      console.log('Keep alive ping ✅');
+    } catch (err) {
+      console.error('Keep alive failed:', err.message);
+    }
+  }, 14 * 60 * 1000);
 
   console.log('✅ Database initialized');
 };
