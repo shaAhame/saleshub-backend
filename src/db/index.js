@@ -55,26 +55,62 @@ const initDB = async () => {
   `);
 
   const bcrypt = require('bcryptjs');
+  const crypto = require('crypto');
+
+  // First-time seed only. Passwords come from Railway variables or are random –
+  // never a fixed password that is visible in the code.
+  const seedPass = (envName) => process.env[envName] || crypto.randomBytes(9).toString('base64url');
+
   const existing = await pool.query("SELECT id FROM users WHERE username = 'admin'");
   if (existing.rows.length === 0) {
-    const hash = await bcrypt.hash('admin123', 10);
+    const adminPass = seedPass('SEED_ADMIN_PASSWORD');
     await pool.query(
       "INSERT INTO users (username, password, role, branch) VALUES ($1, $2, 'admin', NULL)",
-      ['admin', hash]
+      ['admin', await bcrypt.hash(adminPass, 10)]
     );
+    console.log(`✅ Seeded admin – password: ${process.env.SEED_ADMIN_PASSWORD ? '(from SEED_ADMIN_PASSWORD)' : adminPass}`);
+
     const managers = [
       { username: 'manager_prime', branch: 'Prime' },
       { username: 'manager_liberty', branch: 'Liberty' },
       { username: 'manager_marino', branch: 'Marino' }
     ];
     for (const m of managers) {
-      const h = await bcrypt.hash('manager123', 10);
+      const pass = seedPass('SEED_MANAGER_PASSWORD');
       await pool.query(
         "INSERT INTO users (username, password, role, branch) VALUES ($1, $2, 'manager', $3)",
-        [m.username, h, m.branch]
+        [m.username, await bcrypt.hash(pass, 10), m.branch]
       );
+      console.log(`✅ Seeded ${m.username} – password: ${process.env.SEED_MANAGER_PASSWORD ? '(from SEED_MANAGER_PASSWORD)' : pass}`);
     }
-    console.log('✅ Default users seeded');
+    console.log('⚠️  Change these passwords from the Users page now.');
+  }
+
+  // A manager MUST belong to a branch (a manager with no branch could see every branch)
+  try {
+    await pool.query(`ALTER TABLE users ADD CONSTRAINT users_manager_needs_branch CHECK (role = 'admin' OR branch IS NOT NULL)`);
+  } catch (e) {
+    if (!/already exists/i.test(e.message)) {
+      console.warn('⚠️  SECURITY: some manager accounts have NO branch – they are blocked until you delete or recreate them:', e.message);
+    }
+  }
+
+  // Security check on every start: warn about default passwords / branchless managers
+  try {
+    const { rows: users } = await pool.query('SELECT username, password, role, branch FROM users');
+    for (const u of users) {
+      for (const weak of ['admin123', 'manager123', 'password', '12345678']) {
+        if (await bcrypt.compare(weak, u.password)) {
+          console.warn(`⚠️  SECURITY: user "${u.username}" still uses a default/weak password – change it now!`);
+          break;
+        }
+      }
+      if (u.role === 'manager' && !u.branch) {
+        console.warn(`⚠️  SECURITY: manager "${u.username}" has no branch – this account is blocked.`);
+      }
+    }
+  } catch (e) {
+    console.warn('Security check skipped:', e.message);
   }
 
   // Add columns if not exist (safe for existing deployments)
