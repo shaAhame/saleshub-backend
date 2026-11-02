@@ -86,6 +86,9 @@ const initDB = async () => {
     console.log('⚠️  Change these passwords from the Users page now.');
   }
 
+  // When a password is changed, logins made before that moment stop working
+  try { await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ`); } catch (e) {}
+
   // A manager MUST belong to a branch (a manager with no branch could see every branch)
   try {
     await pool.query(`ALTER TABLE users ADD CONSTRAINT users_manager_needs_branch CHECK (role = 'admin' OR branch IS NOT NULL)`);

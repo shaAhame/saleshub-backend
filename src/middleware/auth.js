@@ -26,11 +26,18 @@ const auth = async (req, res, next) => {
 
   try {
     const { rows } = await pool.query(
-      'SELECT id, username, role, branch FROM users WHERE id = $1',
+      'SELECT id, username, role, branch, password_changed_at FROM users WHERE id = $1',
       [decoded.id]
     );
     const user = rows[0];
     if (!user) return res.status(401).json({ error: 'User no longer exists' });
+
+    // Password was changed after this login → log out everywhere
+    if (user.password_changed_at &&
+        decoded.iat < Math.floor(new Date(user.password_changed_at).getTime() / 1000)) {
+      return res.status(401).json({ error: 'Password was changed. Please log in again.' });
+    }
+    delete user.password_changed_at;
 
     if (user.role !== 'admin') {
       if (user.role !== 'manager' || !BRANCHES.includes(user.branch)) {
